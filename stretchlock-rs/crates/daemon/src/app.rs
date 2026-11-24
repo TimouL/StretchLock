@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 
 use stretchlock_core::config::{Config, ConfigStore};
 use stretchlock_core::ipc::{Request, Response, Status, TimerState};
+use stretchlock_core::scene::{LockScene, ScenePicker};
 use stretchlock_core::stats::Stats;
 
 use crate::timer::{Timer, TimerConfig};
@@ -35,6 +36,11 @@ pub struct App {
     breaking: AtomicBool,
     /// Rotates through the configured break messages, one per break.
     message_index: std::sync::atomic::AtomicUsize,
+    /// Background-scene picker; its state is persisted in stats so the
+    /// no-repeat / animal-pity guarantee survives restarts.
+    scene_picker: Mutex<ScenePicker>,
+    /// Scene chosen for the current break.
+    current_scene: Mutex<Option<LockScene>>,
     #[cfg(windows)]
     hook: Mutex<Option<HookGuard>>,
     #[cfg(windows)]
@@ -46,6 +52,9 @@ impl App {
         config.validate();
         #[cfg(windows)]
         crate::mascot::select_set(&config.mascot);
+        // Restore the scene picker from the persisted stats state.
+        let (last_scene_id, streak) = stats.scene_state();
+        let scene_picker = ScenePicker::from_parts(LockScene::from_id(last_scene_id), streak);
         let timer = Arc::new(Timer::new(TimerConfig {
             work_seconds: config.work_interval_minutes * 60,
             break_seconds: config.break_duration_minutes * 60,
@@ -62,6 +71,8 @@ impl App {
             timer,
             breaking: AtomicBool::new(false),
             message_index: std::sync::atomic::AtomicUsize::new(0),
+            scene_picker: Mutex::new(scene_picker),
+            current_scene: Mutex::new(None),
             #[cfg(windows)]
             hook: Mutex::new(None),
             #[cfg(windows)]
@@ -137,6 +148,16 @@ impl App {
         log::info!("begin_break enter");
         self.breaking.store(true, Ordering::SeqCst);
         self.message_index.fetch_add(1, Ordering::SeqCst);
+        // Pick this break's background scene and persist the picker
+        // state right away, so the guarantee holds across restarts.
+        let (scene, streak) = {
+            let mut picker = self.scene_picker.lock();
+            let scene = picker.pick();
+            (scene, picker.non_animal_streak())
+        };
+        *self.current_scene.lock() = Some(scene);
+        self.stats.lock().set_scene_state(scene.id(), streak);
+        log::info!("Break scene: {} ({})", scene.name(), scene.id());
         log::info!("Break started");
         #[cfg(windows)]
         {
@@ -240,6 +261,7 @@ impl App {
                 animate,
                 fraction.clamp(0.0, 1.0),
                 false,
+                *self.current_scene.lock(),
             );
         }
     }
@@ -262,6 +284,7 @@ impl App {
                 animate,
                 0.0,
                 true,
+                *self.current_scene.lock(),
             );
         }
     }

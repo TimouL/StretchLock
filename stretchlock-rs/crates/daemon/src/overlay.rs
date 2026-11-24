@@ -68,6 +68,9 @@ pub struct OverlayContent {
     pub fraction: f32,
     /// Break finished, awaiting the resume button.
     pub done: bool,
+    /// Background scene for this break (redesign phase 2); drawn only
+    /// when `animate` is on.
+    pub scene: Option<stretchlock_core::scene::LockScene>,
 }
 
 static CONTENT: Mutex<OverlayContent> = Mutex::new(OverlayContent {
@@ -80,6 +83,7 @@ static CONTENT: Mutex<OverlayContent> = Mutex::new(OverlayContent {
     animate: true,
     fraction: 1.0,
     done: false,
+    scene: None,
 });
 
 /// Blurred, darkened desktop capture shared by every overlay window.
@@ -240,6 +244,7 @@ pub fn update(
     animate: bool,
     fraction: f32,
     done: bool,
+    scene: Option<stretchlock_core::scene::LockScene>,
 ) {
     {
         let mut content = CONTENT.lock();
@@ -252,6 +257,7 @@ pub fn update(
         content.animate = animate;
         content.fraction = fraction;
         content.done = done;
+        content.scene = scene;
     }
     broadcast(WM_APP_UPDATE);
 }
@@ -425,6 +431,17 @@ unsafe extern "system" fn overlay_wndproc(
         WM_ERASEBKGND => LRESULT(1),
         WM_TIMER => {
             if ACTIVE.load(Ordering::SeqCst) {
+                // With a background scene playing, particles move across
+                // the whole screen, so invalidate everything; otherwise
+                // keep the cheaper content-region refresh.
+                let full = {
+                    let content = CONTENT.lock();
+                    content.animate && content.scene.is_some()
+                };
+                if full {
+                    let _ = InvalidateRect(hwnd, None, false);
+                    return LRESULT(0);
+                }
                 let mut client = RECT::default();
                 let _ = GetClientRect(hwnd, &mut client);
                 let mut card = card_rect(&client);
@@ -755,6 +772,8 @@ unsafe fn paint(hwnd: HWND) {
 
     target.BeginDraw();
 
+    let content = CONTENT.lock().clone();
+
     let bg = d2d_color(11, 9, 19, 1.0);
     let _ = target.Clear(Some(&bg));
     if let Some(bmp) = &wt.capture_bitmap {
@@ -783,7 +802,24 @@ unsafe fn paint(hwnd: HWND) {
         }
     }
 
-    let content = CONTENT.lock().clone();
+    // ---- Background scene layer (redesign phase 2) ----
+    // Drawn over the captured desktop, under all text content. Purely
+    // decorative; skipped entirely when animation is disabled.
+    if content.animate {
+        if let Some(scene) = content.scene {
+            let t = animation_ms() as f32 / 1000.0;
+            crate::scene_draw::draw_scene(
+                &target,
+                &write,
+                &factory,
+                scene,
+                t,
+                width as f32,
+                height as f32,
+            );
+        }
+    }
+
     // Redesign phase 1 layout: wide screens split into a left
     // clock/date/message column (~42%) and a right column carrying the
     // existing flow (mascot, ring, stats, passphrase) around `cx`.
@@ -1155,7 +1191,7 @@ unsafe fn paint(hwnd: HWND) {
 /// Greedy character-wise wrapping (handles CJK); returns lines + widest width.
 // ---- Direct2D rendering ----
 
-fn d2d_color(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
+pub(crate) fn d2d_color(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
         r: r as f32 / 255.0,
         g: g as f32 / 255.0,
@@ -1180,7 +1216,7 @@ unsafe fn round_stroke(factory: &ID2D1Factory) -> Option<ID2D1StrokeStyle> {
         .ok()
 }
 
-unsafe fn solid_brush(
+pub(crate) unsafe fn solid_brush(
     target: &ID2D1HwndRenderTarget,
     r: u8,
     g: u8,
@@ -1192,7 +1228,7 @@ unsafe fn solid_brush(
     sb.cast().ok()
 }
 
-unsafe fn aurora_gradient_brush(
+pub(crate) unsafe fn aurora_gradient_brush(
     target: &ID2D1HwndRenderTarget,
     cx: f32,
     cy: f32,
@@ -1225,7 +1261,7 @@ unsafe fn aurora_gradient_brush(
     lb.cast().ok()
 }
 
-unsafe fn text_format(
+pub(crate) unsafe fn text_format(
     write: &IDWriteFactory,
     family: windows::core::PCWSTR,
     size: f32,
@@ -1259,7 +1295,7 @@ unsafe fn text_format(
     Some(fmt)
 }
 
-unsafe fn draw_text_d2d(
+pub(crate) unsafe fn draw_text_d2d(
     target: &ID2D1HwndRenderTarget,
     format: &IDWriteTextFormat,
     text: &str,
