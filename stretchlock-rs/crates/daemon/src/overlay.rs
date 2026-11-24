@@ -897,6 +897,35 @@ unsafe fn paint(hwnd: HWND) {
     }
     let scale = dpi as f32 / 96.0;
     let g = 8.0 * scale;
+    // Height fit: on short screens (e.g. 800x600) the natural stack
+    // (clock, date, bubble, mascot, ring, stats, field, hint) is taller
+    // than the display, which pushed the ring and passphrase field off
+    // the bottom edge. Estimate the natural height with the unfitted
+    // formulas below and shrink the stack by `fit` (never below 0.55)
+    // so everything stays on screen; roomy screens keep fit = 1.
+    let avail_h = height as f32 - short * 0.045 - 30.0 * scale;
+    let mut natural = short * 0.30 + g * 3.0; // mascot + gap
+    if !wide {
+        natural += short * 0.11 * 1.25 + g; // clock + gap
+        natural += 22.0 * scale + g * 3.0; // date + gap
+        if !content.message.is_empty() {
+            natural += 20.0 * scale * 1.5 * 2.0 + 26.0 * scale + g * 3.0; // bubble + gap
+        }
+    }
+    if content.done {
+        natural += g; // done branch advances one extra gap after the mascot
+        natural += 20.0 * scale + g * 2.0; // stats + gap
+    } else {
+        natural += short * 0.30 + g * 3.0; // ring + gap
+        natural += 20.0 * scale + g * 2.0; // stats + gap
+        natural += 48.0 * scale + 6.0 * scale + 18.0 * scale; // field + hint
+    }
+    let fit = if natural > avail_h && natural > 0.0 {
+        (avail_h / natural).clamp(0.55, 1.0)
+    } else {
+        1.0
+    };
+    let gf = g * fit;
     let mut cursor = short * 0.045;
 
     // ---- Clock + date ----
@@ -961,7 +990,7 @@ unsafe fn paint(hwnd: HWND) {
         }
     } else {
         // Narrow: a compact clock + date centred above the existing flow.
-        let nsize = short * 0.11;
+        let nsize = short * 0.11 * fit;
         if let Some(fmt) = text_format(&write, w!("Segoe UI"), nsize, DWRITE_FONT_WEIGHT_LIGHT, true, true) {
             if let Some(white) = solid_brush(&target, 255, 255, 255, 1.0) {
                 let rect = D2D_RECT_F {
@@ -973,7 +1002,7 @@ unsafe fn paint(hwnd: HWND) {
                 draw_text_d2d(&target, &fmt, &clock_text, &rect, &white);
             }
         }
-        cursor += nsize * 1.25 + g;
+        cursor += nsize * 1.25 + gf;
         if let Some(fmt) = text_format(&write, w!("Segoe UI"), 16.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, true) {
             if let Some(c) = solid_brush(&target, 216, 210, 232, 1.0) {
                 let rect = D2D_RECT_F {
@@ -985,15 +1014,15 @@ unsafe fn paint(hwnd: HWND) {
                 draw_text_d2d(&target, &fmt, &date_text, &rect, &c);
             }
         }
-        cursor += 22.0 * scale + g * 3.0;
+        cursor += 22.0 * scale + gf * 3.0;
     }
 
     // ---- Speech bubble (narrow layout only; wide uses the left column) ----
-    let bubble_font = 20.0 * scale;
+    let bubble_font = 20.0 * scale * fit;
     let max_bubble_w = short * 0.80;
     if !wide && !content.message.is_empty() {
         let line_h = bubble_font * 1.5;
-        let bubble_h = line_h * 2.0 + 26.0 * scale;
+        let bubble_h = line_h * 2.0 + 26.0 * scale * fit;
         let bubble_w = max_bubble_w;
         let bubble_left = cx - bubble_w / 2.0;
         let rr = D2D1_ROUNDED_RECT {
@@ -1016,18 +1045,18 @@ unsafe fn paint(hwnd: HWND) {
             if let Some(white) = solid_brush(&target, 255, 255, 255, 1.0) {
                 let rect = D2D_RECT_F {
                     left: bubble_left,
-                    top: cursor + 13.0 * scale,
+                    top: cursor + 13.0 * scale * fit,
                     right: bubble_left + bubble_w,
-                    bottom: cursor + bubble_h - 13.0 * scale,
+                    bottom: cursor + bubble_h - 13.0 * scale * fit,
                 };
                 draw_text_d2d(&target, &fmt, &content.message, &rect, &white);
             }
         }
-        cursor = bubble_h + cursor + g * 3.0;
+        cursor = bubble_h + cursor + gf * 3.0;
     }
 
     // ---- Mascot ----
-    let mascot_size = short * 0.30;
+    let mascot_size = short * 0.30 * fit;
     let mascot_rect = RECT {
         left: (cx - mascot_size / 2.0) as i32,
         top: cursor as i32,
@@ -1035,11 +1064,11 @@ unsafe fn paint(hwnd: HWND) {
         bottom: (cursor + mascot_size) as i32,
     };
     draw_mascot_d2d(&target, &mascot_rect, &content);
-    cursor = mascot_rect.bottom as f32 + g * 3.0;
+    cursor = mascot_rect.bottom as f32 + gf * 3.0;
 
     // ---- Progress ring + countdown ----
     if !content.done {
-        let ring_diam = short * 0.30;
+        let ring_diam = short * 0.30 * fit;
         let ring_center_x = cx;
         let ring_center_y = cursor + ring_diam / 2.0;
         let fraction = content.fraction;
@@ -1064,9 +1093,9 @@ unsafe fn paint(hwnd: HWND) {
                 draw_text_d2d(&target, &fmt, &content.countdown, &rect, &white);
             }
         }
-        cursor = ring_center_y + ring_diam / 2.0 + g * 3.0;
+        cursor = ring_center_y + ring_diam / 2.0 + gf * 3.0;
     } else {
-        cursor = mascot_rect.bottom as f32 + g * 4.0;
+        cursor = mascot_rect.bottom as f32 + gf * 4.0;
     }
 
     // ---- Stats ----
@@ -1081,7 +1110,7 @@ unsafe fn paint(hwnd: HWND) {
             draw_text_d2d(&target, &fmt, &content.stats, &rect, &c);
         }
     }
-    cursor += 20.0 * scale + g * 2.0;
+    cursor += 20.0 * scale + gf * 2.0;
 
     if !content.done {
         // ---- Passphrase field ----
@@ -1096,7 +1125,7 @@ unsafe fn paint(hwnd: HWND) {
         };
         let field_cx = cx + shake;
         let field_w = (short * 0.28).max(280.0 * scale);
-        let field_h = 48.0 * scale;
+        let field_h = (48.0 * scale * fit).max(34.0 * scale);
         let field = D2D_RECT_F {
             left: field_cx - field_w / 2.0,
             top: cursor,
