@@ -5,6 +5,7 @@ pub mod config;
 pub mod ipc;
 pub mod logging;
 pub mod passphrase;
+pub mod passphrase_gate;
 pub mod scene;
 pub mod stats;
 

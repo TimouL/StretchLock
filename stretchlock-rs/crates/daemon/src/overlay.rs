@@ -71,6 +71,13 @@ pub struct OverlayContent {
     /// Background scene for this break (redesign phase 2); drawn only
     /// when `animate` is on.
     pub scene: Option<stretchlock_core::scene::LockScene>,
+    /// The last submitted passphrase was wrong (redesign phase 3); the
+    /// hint is tinted red while this is set. The shake itself is driven
+    /// by the error instant, see `set_passphrase_error`.
+    pub passphrase_error: bool,
+    /// Seconds of passphrase lockout remaining (phase 3); while > 0 the
+    /// field renders greyed out and ignores the typed length.
+    pub lockout_seconds: u32,
 }
 
 static CONTENT: Mutex<OverlayContent> = Mutex::new(OverlayContent {
@@ -84,6 +91,8 @@ static CONTENT: Mutex<OverlayContent> = Mutex::new(OverlayContent {
     fraction: 1.0,
     done: false,
     scene: None,
+    passphrase_error: false,
+    lockout_seconds: 0,
 });
 
 /// Blurred, darkened desktop capture shared by every overlay window.
@@ -182,6 +191,18 @@ fn animation_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// When the last wrong passphrase was submitted (redesign phase 3). The
+/// paint loop derives the field shake and the red border from how long
+/// ago this was, the same pattern as `ANIM_EPOCH` for the mascot.
+static ERROR_EPOCH: parking_lot::Mutex<Option<std::time::Instant>> = parking_lot::Mutex::new(None);
+
+/// Seconds since the last wrong passphrase, if one was recorded.
+fn error_elapsed_secs() -> Option<f32> {
+    ERROR_EPOCH
+        .lock()
+        .map(|start| start.elapsed().as_secs_f32())
+}
+
 /// Spawn the overlay UI thread. Idempotent.
 pub fn start() {
     let mut thread_id = UI_THREAD_ID.lock();
@@ -209,6 +230,8 @@ pub fn activate() {
     unsafe { capture_desktop() };
     CAPTURE_VERSION.fetch_add(1, Ordering::SeqCst);
     *ANIM_EPOCH.lock() = Some(std::time::Instant::now());
+    // A new break starts clean: no leftover shake from the previous one.
+    *ERROR_EPOCH.lock() = None;
     ACTIVE.store(true, Ordering::SeqCst);
     broadcast(WM_APP_ACTIVATE);
 }
@@ -232,6 +255,28 @@ pub fn set_passphrase_len(len: usize) {
     broadcast(WM_APP_UPDATE);
 }
 
+/// Report a wrong passphrase submission (redesign phase 3). Records the
+/// error instant — the paint loop shakes the field for ~0.5 s and keeps a
+/// red border for ~1.5 s from it — flags the error for the hint colour,
+/// and puts immediate feedback in the hint slot so the user sees what
+/// happened without waiting for the daemon's 1 Hz content update (which
+/// overwrites the hint with its own countdown while locked).
+/// `lockout_seconds` is the lockout this failure triggered (30), or 0.
+pub fn set_passphrase_error(lockout_seconds: u32) {
+    *ERROR_EPOCH.lock() = Some(std::time::Instant::now());
+    {
+        let mut content = CONTENT.lock();
+        content.passphrase_error = true;
+        content.lockout_seconds = lockout_seconds;
+        content.hint = if lockout_seconds > 0 {
+            format!("口令已锁定，还剩 {lockout_seconds} 秒")
+        } else {
+            "口令不对，请重试".to_string()
+        };
+    }
+    broadcast(WM_APP_UPDATE);
+}
+
 /// Update the text slots shown on every overlay.
 #[allow(clippy::too_many_arguments)]
 pub fn update(
@@ -245,6 +290,8 @@ pub fn update(
     fraction: f32,
     done: bool,
     scene: Option<stretchlock_core::scene::LockScene>,
+    passphrase_error: bool,
+    lockout_seconds: u32,
 ) {
     {
         let mut content = CONTENT.lock();
@@ -258,6 +305,8 @@ pub fn update(
         content.fraction = fraction;
         content.done = done;
         content.scene = scene;
+        content.passphrase_error = passphrase_error;
+        content.lockout_seconds = lockout_seconds;
     }
     broadcast(WM_APP_UPDATE);
 }
@@ -1036,28 +1085,48 @@ unsafe fn paint(hwnd: HWND) {
 
     if !content.done {
         // ---- Passphrase field ----
+        // Phase 3 feedback: after a wrong submission the field shakes
+        // for ~0.5 s (decaying sine, from the recorded error instant);
+        // during lockout it renders greyed out and ignores typed input.
+        let locked = content.lockout_seconds > 0;
+        let err_secs = error_elapsed_secs();
+        let shake = match err_secs {
+            Some(s) if s < 0.6 => 8.0 * scale * (s * 40.0).sin() * (-s * 4.0).exp(),
+            _ => 0.0,
+        };
+        let field_cx = cx + shake;
         let field_w = (short * 0.28).max(280.0 * scale);
         let field_h = 48.0 * scale;
         let field = D2D_RECT_F {
-            left: cx - field_w / 2.0,
+            left: field_cx - field_w / 2.0,
             top: cursor,
-            right: cx + field_w / 2.0,
+            right: field_cx + field_w / 2.0,
             bottom: cursor + field_h,
         };
         let typed = content.passphrase_len > 0;
 
-        // 玻璃填充
+        // 玻璃填充（锁定中更淡，显得不可用）
         let field_rr = D2D1_ROUNDED_RECT {
             rect: field,
             radiusX: field_h / 2.0,
             radiusY: field_h / 2.0,
         };
-        if let Some(glass) = solid_brush(&target, 255, 255, 255, 0.10) {
+        let fill_alpha = if locked { 0.05 } else { 0.10 };
+        if let Some(glass) = solid_brush(&target, 255, 255, 255, fill_alpha) {
             let _ = target.FillRoundedRectangle(&field_rr, Some(&glass));
         }
-        // 边框：聚焦时强调渐变，未聚焦时白 15%
-        if typed {
-            if let Some(edge) = aurora_gradient_brush(&target, cx, cursor + field_h / 2.0, field_w / 2.0) {
+        // 边框：锁定灰边 > 输错后 1.5 秒内红边 > 聚焦渐变 > 未聚焦白 15%
+        let error_recent = matches!(err_secs, Some(s) if s < 1.5);
+        if locked {
+            if let Some(edge) = solid_brush(&target, 255, 255, 255, 0.08) {
+                let _ = target.DrawRoundedRectangle(&field_rr, Some(&edge), 1.0, None);
+            }
+        } else if error_recent {
+            if let Some(edge) = solid_brush(&target, 248, 113, 113, 1.0) {
+                let _ = target.DrawRoundedRectangle(&field_rr, Some(&edge), 1.5 * scale, None);
+            }
+        } else if typed {
+            if let Some(edge) = aurora_gradient_brush(&target, field_cx, cursor + field_h / 2.0, field_w / 2.0) {
                 let _ = target.DrawRoundedRectangle(&field_rr, Some(&edge), 1.5 * scale, None);
             }
         } else if let Some(edge) = solid_brush(&target, 255, 255, 255, 0.15) {
@@ -1065,7 +1134,8 @@ unsafe fn paint(hwnd: HWND) {
         }
 
         // 锁图标：锁环 + 锁体，整体垂直居中于胶囊
-        if let Some(lock) = solid_brush(&target, 135, 135, 135, 1.0) {
+        let lock_grey = if locked { 90 } else { 135 };
+        if let Some(lock) = solid_brush(&target, lock_grey, lock_grey, lock_grey, 1.0) {
             let lx = field.left + 16.0 * scale;
             let lcy = cursor + field_h / 2.0;
             let lr = 6.0 * scale;
@@ -1097,7 +1167,11 @@ unsafe fn paint(hwnd: HWND) {
             right: field.right - 10.0 * scale,
             bottom: cursor + field_h,
         };
-        if typed {
+        if locked {
+            // Locked out: no dots, no placeholder — the hook buffer may
+            // keep recording keystrokes, but nothing of it is shown and
+            // submissions are discarded by the daemon until it expires.
+        } else if typed {
             // iOS-style dots, drawn as filled circles rather than text
             // bullets: one dot per typed character, showing at most the
             // last 24, centred in the field area right of the lock icon.
@@ -1136,7 +1210,14 @@ unsafe fn paint(hwnd: HWND) {
 
         cursor = field.bottom + 6.0 * scale;
         if let Some(fmt) = text_format(&write, w!("Segoe UI"), 13.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, false) {
-            if let Some(h) = solid_brush(&target, 148, 135, 138, 1.0) {
+            // Hint turns soft red while the last submission was wrong
+            // (including the lockout countdown the daemon puts there).
+            let (hr, hg, hb) = if content.passphrase_error {
+                (252, 165, 165)
+            } else {
+                (148, 135, 138)
+            };
+            if let Some(h) = solid_brush(&target, hr, hg, hb, 1.0) {
                 let rect = D2D_RECT_F {
                     left: col_left,
                     top: cursor,

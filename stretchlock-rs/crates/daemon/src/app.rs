@@ -4,11 +4,13 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 
 use stretchlock_core::config::{Config, ConfigStore};
 use stretchlock_core::ipc::{Request, Response, Status, TimerState};
+use stretchlock_core::passphrase_gate::{PassphraseGate, WrongOutcome};
 use stretchlock_core::scene::{LockScene, ScenePicker};
 use stretchlock_core::stats::Stats;
 
@@ -41,6 +43,11 @@ pub struct App {
     scene_picker: Mutex<ScenePicker>,
     /// Scene chosen for the current break.
     current_scene: Mutex<Option<LockScene>>,
+    /// Wrong-passphrase feedback (redesign phase 3): counts consecutive
+    /// failures and holds the lockout deadline after 3 misses. The pure
+    /// state machine lives in core so it is unit-tested; the daemon only
+    /// feeds it submissions and reads back what the overlay should show.
+    passphrase_gate: Mutex<PassphraseGate>,
     #[cfg(windows)]
     hook: Mutex<Option<HookGuard>>,
     #[cfg(windows)]
@@ -73,6 +80,7 @@ impl App {
             message_index: std::sync::atomic::AtomicUsize::new(0),
             scene_picker: Mutex::new(scene_picker),
             current_scene: Mutex::new(None),
+            passphrase_gate: Mutex::new(PassphraseGate::new()),
             #[cfg(windows)]
             hook: Mutex::new(None),
             #[cfg(windows)]
@@ -125,12 +133,39 @@ impl App {
                 return;
             }
             if let Some(typed) = crate::hooks::take_submitted_passphrase() {
+                let now = Instant::now();
+                if self.passphrase_gate.lock().is_locked(now) {
+                    // Lockout after repeated failures: taking the
+                    // submission already cleared the hook buffer, and it
+                    // is deliberately *not* verified — even the correct
+                    // passphrase cannot end the break during lockout.
+                    log::debug!("Passphrase submitted during lockout; discarded");
+                    return;
+                }
                 if self.config.lock().verify_passphrase(&typed) {
+                    self.passphrase_gate.lock().on_correct();
                     log::info!("Break overridden via passphrase");
                     self.timer.skip_break();
                     self.end_break();
                 } else {
-                    log::debug!("Passphrase mismatch during break");
+                    let (outcome, remaining) = {
+                        let mut gate = self.passphrase_gate.lock();
+                        let outcome = gate.on_wrong(now);
+                        (outcome, gate.lockout_remaining(Instant::now()))
+                    };
+                    match outcome {
+                        WrongOutcome::LockedOut => {
+                            log::info!("Passphrase lockout started ({remaining}s)");
+                        }
+                        WrongOutcome::Failed { failures } => {
+                            log::debug!(
+                                "Passphrase mismatch during break ({failures} consecutive failures)"
+                            );
+                        }
+                    }
+                    // Immediate shake / red border / lockout display,
+                    // without waiting for the next 1 Hz tick.
+                    overlay::set_passphrase_error(remaining);
                 }
             }
         }
@@ -147,6 +182,8 @@ impl App {
     fn begin_break(&self) {
         log::info!("begin_break enter");
         self.breaking.store(true, Ordering::SeqCst);
+        // Every break starts with a fresh failure counter / no lockout.
+        self.passphrase_gate.lock().reset();
         self.message_index.fetch_add(1, Ordering::SeqCst);
         // Pick this break's background scene and persist the picker
         // state right away, so the guarantee holds across restarts.
@@ -190,6 +227,7 @@ impl App {
 
     fn end_break(&self) {
         self.breaking.store(false, Ordering::SeqCst);
+        self.passphrase_gate.lock().reset();
         #[cfg(windows)]
         {
             self.hook.lock().take();
@@ -232,10 +270,19 @@ impl App {
         {
             let snapshot = self.timer.snapshot();
             let (breaks_today, total_breaks, streak) = self.stats.lock().get_summary();
-            let hint = if self.keyboard.lock().is_some() {
-                "输入口令后按回车可提前结束"
+            // Phase 3 feedback state: while locked, the hint slot counts
+            // the lockout down instead of offering the override.
+            let (lockout_seconds, passphrase_error) = {
+                let gate = self.passphrase_gate.lock();
+                let remaining = gate.lockout_remaining(Instant::now());
+                (remaining, gate.failures() > 0 || remaining > 0)
+            };
+            let hint = if lockout_seconds > 0 {
+                format!("口令已锁定，还剩 {lockout_seconds} 秒")
+            } else if self.keyboard.lock().is_some() {
+                "输入口令后按回车可提前结束".to_string()
             } else {
-                ""
+                String::new()
             };
             let config = self.config.lock();
             let message = config
@@ -255,13 +302,15 @@ impl App {
                 &format!(
                     "今日 {breaks_today} 次    累计 {total_breaks} 次    连续 {streak} 天"
                 ),
-                hint,
+                &hint,
                 &message,
                 crate::hooks::passphrase_len(),
                 animate,
                 fraction.clamp(0.0, 1.0),
                 false,
                 *self.current_scene.lock(),
+                passphrase_error,
+                lockout_seconds,
             );
         }
     }
@@ -285,6 +334,8 @@ impl App {
                 0.0,
                 true,
                 *self.current_scene.lock(),
+                false,
+                0,
             );
         }
     }
