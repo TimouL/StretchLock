@@ -2729,6 +2729,7 @@ name = "stretchlock-daemon"
 version = "1.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "gif 0.13.3",
  "log",
  "parking_lot",

@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 
+use chrono::{Datelike, Local, Timelike};
+
 use windows::core::{w, Interface};
 use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -98,20 +100,20 @@ static CAPTURE: Mutex<Option<Capture>> = Mutex::new(None);
 /// Returns a DC backed by a DIB of at least `width`×`height`, recreating it
 /// when the window size changes.
 /// Run `f` over the back-buffer pixels (index = y*width + x).
-/// Card rectangle for a given client size, shared by painting and the
-/// animation invalidation so both agree.
+/// Content rectangle for a given client size, shared by painting and the
+/// animation invalidation so both agree. The redesign spreads content
+/// across most of the screen (a clock/date column on wide layouts, the
+/// centred column otherwise), so the refresh region covers nearly the
+/// whole client area instead of the old centred card — otherwise the
+/// clock column would never repaint.
 fn card_rect(client: &RECT) -> RECT {
     let width = (client.right - client.left).max(1);
     let height = (client.bottom - client.top).max(1);
-    let card_w = (width as f32 * 0.52) as i32;
-    let card_h = (height as f32 * 0.60) as i32;
-    let left = client.left + (width - card_w) / 2;
-    let top = client.top + (height - card_h) * 9 / 20;
     RECT {
-        left,
-        top,
-        right: left + card_w,
-        bottom: top + card_h,
+        left: client.left + (width as f32 * 0.03) as i32,
+        top: client.top + (height as f32 * 0.02) as i32,
+        right: client.left + (width as f32 * 0.97) as i32,
+        bottom: client.top + (height as f32 * 0.95) as i32,
     }
 }
 
@@ -782,7 +784,22 @@ unsafe fn paint(hwnd: HWND) {
     }
 
     let content = CONTENT.lock().clone();
-    let cx = width as f32 / 2.0;
+    // Redesign phase 1 layout: wide screens split into a left
+    // clock/date/message column (~42%) and a right column carrying the
+    // existing flow (mascot, ring, stats, passphrase) around `cx`.
+    // Narrow screens keep the original single centred column.
+    let wide = width >= 1100 || width as f32 >= height as f32 * 1.4;
+    let cx = if wide {
+        width as f32 * 0.71
+    } else {
+        width as f32 / 2.0
+    };
+    // Horizontal span for the full-width rows (stats, hint) in the column.
+    let (col_left, col_right) = if wide {
+        (width as f32 * 0.48, width as f32)
+    } else {
+        (0.0, width as f32)
+    };
 
     let screen = GetDC(None);
     let dpi = if screen.is_invalid() {
@@ -797,10 +814,99 @@ unsafe fn paint(hwnd: HWND) {
     let g = 8.0 * scale;
     let mut cursor = short * 0.045;
 
-    // ---- Speech bubble ----
+    // ---- Clock + date ----
+    // Computed fresh on every paint (the overlay repaints at ~25 fps while
+    // active), so no new content field is needed. Weekday names are mapped
+    // by hand instead of relying on the system locale.
+    let now = Local::now();
+    let clock_text = format!("{:02}:{:02}", now.hour(), now.minute());
+    let weekday_cn = match now.weekday() {
+        chrono::Weekday::Mon => "星期一",
+        chrono::Weekday::Tue => "星期二",
+        chrono::Weekday::Wed => "星期三",
+        chrono::Weekday::Thu => "星期四",
+        chrono::Weekday::Fri => "星期五",
+        chrono::Weekday::Sat => "星期六",
+        chrono::Weekday::Sun => "星期日",
+    };
+    let date_text = format!("{}月{}日 {}", now.month(), now.day(), weekday_cn);
+    if wide {
+        // Left column: big light clock, date, then the break message as
+        // plain text (no speech-bubble box in this layout).
+        let clock_size = short * 0.13;
+        let col_cx = width as f32 * 0.24;
+        let col_w = width as f32 * 0.40;
+        let mut ly = height as f32 * 0.24;
+        if let Some(fmt) = text_format(&write, w!("Segoe UI"), clock_size, DWRITE_FONT_WEIGHT_LIGHT, true, true) {
+            if let Some(white) = solid_brush(&target, 255, 255, 255, 1.0) {
+                let rect = D2D_RECT_F {
+                    left: col_cx - col_w / 2.0,
+                    top: ly,
+                    right: col_cx + col_w / 2.0,
+                    bottom: ly + clock_size * 1.25,
+                };
+                draw_text_d2d(&target, &fmt, &clock_text, &rect, &white);
+            }
+        }
+        ly += clock_size * 1.25 + g * 2.0;
+        if let Some(fmt) = text_format(&write, w!("Segoe UI"), 20.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, true) {
+            if let Some(c) = solid_brush(&target, 216, 210, 232, 1.0) {
+                let rect = D2D_RECT_F {
+                    left: col_cx - col_w / 2.0,
+                    top: ly,
+                    right: col_cx + col_w / 2.0,
+                    bottom: ly + 28.0 * scale,
+                };
+                draw_text_d2d(&target, &fmt, &date_text, &rect, &c);
+            }
+        }
+        ly += 28.0 * scale + g * 4.0;
+        if !content.message.is_empty() {
+            if let Some(fmt) = text_format(&write, w!("Segoe UI"), 20.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, false) {
+                if let Some(white) = solid_brush(&target, 255, 255, 255, 0.92) {
+                    let rect = D2D_RECT_F {
+                        left: col_cx - col_w / 2.0,
+                        top: ly,
+                        right: col_cx + col_w / 2.0,
+                        bottom: ly + 20.0 * scale * 1.5 * 3.0,
+                    };
+                    draw_text_d2d(&target, &fmt, &content.message, &rect, &white);
+                }
+            }
+        }
+    } else {
+        // Narrow: a compact clock + date centred above the existing flow.
+        let nsize = short * 0.11;
+        if let Some(fmt) = text_format(&write, w!("Segoe UI"), nsize, DWRITE_FONT_WEIGHT_LIGHT, true, true) {
+            if let Some(white) = solid_brush(&target, 255, 255, 255, 1.0) {
+                let rect = D2D_RECT_F {
+                    left: 0.0,
+                    top: cursor,
+                    right: width as f32,
+                    bottom: cursor + nsize * 1.25,
+                };
+                draw_text_d2d(&target, &fmt, &clock_text, &rect, &white);
+            }
+        }
+        cursor += nsize * 1.25 + g;
+        if let Some(fmt) = text_format(&write, w!("Segoe UI"), 16.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, true) {
+            if let Some(c) = solid_brush(&target, 216, 210, 232, 1.0) {
+                let rect = D2D_RECT_F {
+                    left: 0.0,
+                    top: cursor,
+                    right: width as f32,
+                    bottom: cursor + 22.0 * scale,
+                };
+                draw_text_d2d(&target, &fmt, &date_text, &rect, &c);
+            }
+        }
+        cursor += 22.0 * scale + g * 3.0;
+    }
+
+    // ---- Speech bubble (narrow layout only; wide uses the left column) ----
     let bubble_font = 20.0 * scale;
     let max_bubble_w = short * 0.80;
-    if !content.message.is_empty() {
+    if !wide && !content.message.is_empty() {
         let line_h = bubble_font * 1.5;
         let bubble_h = line_h * 2.0 + 26.0 * scale;
         let bubble_w = max_bubble_w;
@@ -882,9 +988,9 @@ unsafe fn paint(hwnd: HWND) {
     if let Some(fmt) = text_format(&write, w!("Segoe UI"), 14.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, false) {
         if let Some(c) = solid_brush(&target, 216, 210, 232, 1.0) {
             let rect = D2D_RECT_F {
-                left: 0.0,
+                left: col_left,
                 top: cursor,
-                right: width as f32,
+                right: col_right,
                 bottom: cursor + 20.0 * scale,
             };
             draw_text_d2d(&target, &fmt, &content.stats, &rect, &c);
@@ -956,10 +1062,34 @@ unsafe fn paint(hwnd: HWND) {
             bottom: cursor + field_h,
         };
         if typed {
-            let masked = "\u{2022}".repeat(content.passphrase_len.min(32));
-            if let Some(fmt) = text_format(&write, w!("Segoe UI"), 20.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, false, true) {
-                if let Some(white) = solid_brush(&target, 255, 255, 255, 1.0) {
-                    draw_text_d2d(&target, &fmt, &masked, &text_rect, &white);
+            // iOS-style dots, drawn as filled circles rather than text
+            // bullets: one dot per typed character, showing at most the
+            // last 24, centred in the field area right of the lock icon.
+            // Pitch/diameter shrink when many dots would overflow.
+            let n = content.passphrase_len.min(24);
+            if let Some(white) = solid_brush(&target, 255, 255, 255, 1.0) {
+                let cy = cursor + field_h / 2.0;
+                let area_w = (text_rect.right - text_rect.left).max(1.0);
+                let mut d = 10.0 * scale;
+                let mut pitch = 14.0 * scale;
+                if n > 1 && (n as f32 - 1.0) * pitch + d > area_w {
+                    pitch = ((area_w - d) / (n as f32 - 1.0)).max(d * 1.05);
+                    d = d.min(pitch * 0.75);
+                }
+                let span = if n > 1 {
+                    (n as f32 - 1.0) * pitch + d
+                } else {
+                    d
+                };
+                let mut dx = text_rect.left + (area_w - span) / 2.0 + d / 2.0;
+                for _ in 0..n {
+                    let dot = D2D1_ELLIPSE {
+                        point: D2D_POINT_2F { x: dx, y: cy },
+                        radiusX: d / 2.0,
+                        radiusY: d / 2.0,
+                    };
+                    let _ = target.FillEllipse(&dot, Some(&white));
+                    dx += pitch;
                 }
             }
         } else if let Some(fmt) = text_format(&write, w!("Segoe UI"), 17.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, false, true) {
@@ -972,9 +1102,9 @@ unsafe fn paint(hwnd: HWND) {
         if let Some(fmt) = text_format(&write, w!("Segoe UI"), 13.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, false) {
             if let Some(h) = solid_brush(&target, 148, 135, 138, 1.0) {
                 let rect = D2D_RECT_F {
-                    left: 0.0,
+                    left: col_left,
                     top: cursor,
-                    right: width as f32,
+                    right: col_right,
                     bottom: cursor + 18.0 * scale,
                 };
                 draw_text_d2d(&target, &fmt, &content.hint, &rect, &h);
