@@ -160,6 +160,33 @@ fn resume_button_rect(client: &RECT, scale: f32) -> RECT {
     }
 }
 
+/// The resume-button rect most recently painted by each overlay window
+/// (client coordinates). The click handler hit-tests this stored rect so
+/// it always matches what was drawn, in both the narrow layout (legacy
+/// centred placement) and the wide layout (button inside the right
+/// column flow, where the position depends on the fitted stack).
+static RESUME_RECTS: Mutex<Option<HashMap<isize, RECT>>> = Mutex::new(None);
+
+fn store_resume_rect(hwnd: HWND, rect: &RECT) {
+    RESUME_RECTS
+        .lock()
+        .get_or_insert_with(HashMap::new)
+        .insert(hwnd.0 as isize, *rect);
+}
+
+fn clear_resume_rect(hwnd: HWND) {
+    if let Some(map) = RESUME_RECTS.lock().as_mut() {
+        map.remove(&(hwnd.0 as isize));
+    }
+}
+
+fn stored_resume_rect(hwnd: HWND) -> Option<RECT> {
+    RESUME_RECTS
+        .lock()
+        .as_ref()
+        .and_then(|map| map.get(&(hwnd.0 as isize)).copied())
+}
+
 static WINDOWS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Displayed ring fraction; eases toward the target every frame so the ring
@@ -517,7 +544,8 @@ unsafe extern "system" fn overlay_wndproc(
                 let dpi = GetDeviceCaps(screen, LOGPIXELSY).max(96);
                 let _ = ReleaseDC(None, screen);
                 let scale = dpi as f32 / 96.0;
-                let rect = resume_button_rect(&client, scale);
+                let rect = stored_resume_rect(hwnd)
+                    .unwrap_or_else(|| resume_button_rect(&client, scale));
                 let lp = lparam.0 as u32;
                 let x = (lp & 0xFFFF) as i16 as i32;
                 let y = ((lp >> 16) & 0xFFFF) as i16 as i32;
@@ -926,7 +954,28 @@ unsafe fn paint(hwnd: HWND) {
         1.0
     };
     let gf = g * fit;
-    let mut cursor = short * 0.045;
+    let field_h_fit = (48.0 * scale * fit).max(34.0 * scale);
+    // Wide layout: centre the right column as a group instead of starting
+    // it at the top of the screen. Its fitted height is estimated with the
+    // same sizes the flow below uses, so the group lands centred; the
+    // left column is centred the same way further down, giving both
+    // columns one shared vertical rhythm.
+    let stack_h = {
+        let mut h = short * 0.30 * fit + gf * 3.0; // mascot + gap
+        if content.done {
+            h += gf + 20.0 * scale + gf * 2.0 + 52.0 * scale; // extra gap + stats + gap + button
+        } else {
+            h += short * 0.30 * fit + gf * 3.0; // ring + gap
+            h += 20.0 * scale + gf * 2.0; // stats + gap
+            h += field_h_fit + 6.0 * scale + 18.0 * scale; // field + hint
+        }
+        h
+    };
+    let mut cursor = if wide {
+        ((height as f32 - stack_h) / 2.0).max(short * 0.045)
+    } else {
+        short * 0.045
+    };
 
     // ---- Clock + date ----
     // Computed fresh on every paint (the overlay repaints at ~25 fps while
@@ -950,7 +999,15 @@ unsafe fn paint(hwnd: HWND) {
         let clock_size = short * 0.13;
         let col_cx = width as f32 * 0.24;
         let col_w = width as f32 * 0.40;
-        let mut ly = height as f32 * 0.24;
+        // Centre the left column as a group too (same treatment as the
+        // right column), instead of anchoring it at 24% of the height.
+        let left_h = clock_size * 1.25 + g * 2.0 + 28.0 * scale + g * 4.0
+            + if content.message.is_empty() {
+                0.0
+            } else {
+                20.0 * scale * 1.5 * 3.0
+            };
+        let mut ly = ((height as f32 - left_h) / 2.0).max(short * 0.045);
         if let Some(fmt) = text_format(&write, w!("Segoe UI"), clock_size, DWRITE_FONT_WEIGHT_LIGHT, true, true) {
             if let Some(white) = solid_brush(&target, 255, 255, 255, 1.0) {
                 let rect = D2D_RECT_F {
@@ -1113,6 +1170,7 @@ unsafe fn paint(hwnd: HWND) {
     cursor += 20.0 * scale + gf * 2.0;
 
     if !content.done {
+        clear_resume_rect(hwnd);
         // ---- Passphrase field ----
         // Phase 3 feedback: after a wrong submission the field shakes
         // for ~0.5 s (decaying sine, from the recorded error instant);
@@ -1125,7 +1183,7 @@ unsafe fn paint(hwnd: HWND) {
         };
         let field_cx = cx + shake;
         let field_w = (short * 0.28).max(280.0 * scale);
-        let field_h = (48.0 * scale * fit).max(34.0 * scale);
+        let field_h = field_h_fit;
         let field = D2D_RECT_F {
             left: field_cx - field_w / 2.0,
             top: cursor,
@@ -1258,7 +1316,24 @@ unsafe fn paint(hwnd: HWND) {
         }
     } else {
         // ---- Resume button ----
-        let btn = resume_button_rect(&client, scale);
+        // Wide layout: the button joins the right column flow under the
+        // stats line instead of floating at the screen centre; narrow
+        // keeps the legacy centred placement. Either way the painted
+        // rect is stored so the click handler hit-tests what was drawn.
+        let btn = if wide {
+            let bw = ((short * 0.28) as i32).max((280.0 * scale) as i32);
+            let bh = (52.0 * scale) as i32;
+            let bcx = cx as i32;
+            RECT {
+                left: bcx - bw / 2,
+                top: cursor as i32,
+                right: bcx + bw / 2,
+                bottom: cursor as i32 + bh,
+            }
+        } else {
+            resume_button_rect(&client, scale)
+        };
+        store_resume_rect(hwnd, &btn);
         let btn_rr = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
                 left: btn.left as f32,
