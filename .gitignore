@@ -1,0 +1,7 @@
+/.rea-tmp/
+/.aicode/
+
+/stretchlock-src/
+/stretchlock-rs/target/
+/stretchlock-rs/dist/
+/StretchLock.exe

@@ -1,0 +1,15 @@
+[package]
+name = "stretchlock-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "StretchLock"
+path = "src/main.rs"
+
+[dependencies]
+stretchlock-core = { path = "../core" }
+stretchlock-daemon = { path = "../daemon" }
+stretchlock-tray = { path = "../tray" }
+log = { workspace = true }

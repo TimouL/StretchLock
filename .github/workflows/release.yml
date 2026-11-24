@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: stretchlock-rs
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stretchlock-rs
+
+      - name: Check tag matches workspace version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          $version = $null
+          $inSection = $false
+          foreach ($line in Get-Content Cargo.toml) {
+            if ($line -match '^\s*\[(.+)\]\s*$') {
+              $inSection = ($Matches[1] -eq 'workspace.package')
+            }
+            elseif ($inSection -and $line -match '^\s*version\s*=\s*"([^"]+)"') {
+              $version = $Matches[1]
+              break
+            }
+          }
+          if (-not $version) {
+            throw "workspace.package version not found in Cargo.toml"
+          }
+          if ($tag -ne $version) {
+            throw "Tag ${{ github.ref_name }} does not match Cargo.toml version $version"
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Test (release gate)
+        run: cargo test --release --workspace
+      - run: cargo build --release
+
+      - name: Collect dist and checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/StretchLock.exe dist/
+          # CI (MSVC) links WebView2LoaderStatic, so the DLL is not required;
+          # shipped anyway so the zip also runs on GNU-built local artifacts.
+          Copy-Item assets/WebView2Loader.dll dist/
+          $lines = foreach ($f in Get-ChildItem dist -File) {
+            "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLower(), $f.Name
+          }
+          $lines | Set-Content dist/SHA256SUMS.txt
+      - name: Pack zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath StretchLock-v${{ env.VERSION }}-win64.zip
+
+      - name: Upload release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            stretchlock-rs/StretchLock-v${{ env.VERSION }}-win64.zip
+            stretchlock-rs/dist/SHA256SUMS.txt
+          generate_release_notes: true
+
+  snapshot:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: stretchlock-rs
+      - run: cargo test --release --workspace
+      - run: cargo build --release
+
+      - name: Collect dist and checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/StretchLock.exe dist/
+          Copy-Item assets/WebView2Loader.dll dist/
+          $lines = foreach ($f in Get-ChildItem dist -File) {
+            "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLower(), $f.Name
+          }
+          $lines | Set-Content dist/SHA256SUMS.txt
+      - name: Pack zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath StretchLock-snapshot-win64.zip
+
+      - name: Upload snapshot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StretchLock-snapshot-win64
+          path: |
+            stretchlock-rs/StretchLock-snapshot-win64.zip
+            stretchlock-rs/dist/SHA256SUMS.txt

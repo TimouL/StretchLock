@@ -1,0 +1,8 @@
+# 本地容器交叉编译用 nightly（rust-lld flavor 需 -Z unstable-options）。
+# CI 在 windows-latest 原生构建，会覆盖 host 与 target：见 ci.yml 覆盖默认 target 为空。
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+linker = "rust-lld"
+rustflags = ["-Z", "unstable-options", "-C", "linker-flavor=gnu-lld", "-C", "link-self-contained=yes"]

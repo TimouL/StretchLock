@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>StretchLock 混合版</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; }
+  body {
+    background: #0b0913;
+    font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  .stage {
+    width: 420px; height: 630px; position: relative;
+    background:
+      radial-gradient(120% 90% at 12% 8%, rgba(139,92,246,0.30), transparent 55%),
+      radial-gradient(110% 80% at 88% 22%, rgba(34,211,238,0.22), transparent 55%),
+      radial-gradient(140% 100% at 50% 100%, rgba(217,70,239,0.14), transparent 60%),
+      #0b0913;
+    border-radius: 28px; overflow: hidden;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .spacer { height: 38px; }
+  .mascot {
+    width: 96px; height: 96px; border-radius: 50%;
+    background: rgba(255,255,255,0.10);
+    border: 1px solid rgba(255,255,255,0.16);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 56px; line-height: 1; margin-bottom: 26px;
+  }
+  .ring-wrap { position: relative; width: 204px; height: 204px; }
+  .ring-wrap svg { width: 100%; height: 100%; display: block; }
+  .countdown {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 46px; font-weight: 600; letter-spacing: 1px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stats { color: rgba(255,255,255,0.65); font-size: 13px; margin-top: 26px; letter-spacing: .5px; }
+  .field {
+    margin-top: 34px; width: 300px; height: 52px; border-radius: 26px;
+    background: rgba(255,255,255,0.10);
+    border: 1px solid rgba(255,255,255,0.16);
+    display: flex; align-items: center; gap: 14px; padding: 0 20px;
+    box-shadow: 0 0 22px rgba(167,139,250,0.20);
+  }
+  .field .lock { font-size: 18px; opacity: .55; }
+  .field .ph { color: rgba(255,255,255,0.45); font-size: 15px; }
+  .hint { color: rgba(255,255,255,0.45); font-size: 12px; margin-top: 18px; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="spacer"></div>
+    <div class="mascot">🐱</div>
+    <div class="ring-wrap">
+      <svg viewBox="0 0 200 200">
+        <defs>
+          <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#a78bfa"/>
+            <stop offset="0.55" stop-color="#f0abfc"/>
+            <stop offset="1" stop-color="#67e8f9"/>
+          </linearGradient>
+        </defs>
+        <circle cx="100" cy="100" r="84" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="10"/>
+        <path d="M 100 16 A 84 84 0 1 1 22.6 154.7" fill="none" stroke="url(#g)" stroke-width="10" stroke-linecap="round"/>
+      </svg>
+      <div class="countdown">19:24</div>
+    </div>
+    <div class="stats">今日 0 次　　累计 84 次　　连续 6 天</div>
+    <div class="field">
+      <span class="lock">🔒</span>
+      <span class="ph">输入口令</span>
+    </div>
+    <div class="hint">输入口令后按回车可提前结束</div>
+  </div>
+</body>
+</html>

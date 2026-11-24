@@ -1,0 +1,27 @@
+[package]
+name = "stretchlock-tray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "stretchlock_tray"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stretchlock-tray"
+path = "src/main.rs"
+
+[dependencies]
+stretchlock-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+
+# UI 相关依赖仅在 Windows 目标下编译：
+# 托盘/tao/wry 的 Linux 后端依赖 GTK 等系统库，musl 交叉测试只需要纯 Rust 的 IPC 部分。
+[target.'cfg(windows)'.dependencies]
+tao = "0.30"
+wry = "0.45"
+tray-icon = "0.19"
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Registry"] }
