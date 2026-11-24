@@ -7,6 +7,8 @@ pub mod app;
 pub mod timer;
 
 #[cfg(windows)]
+pub mod animal_scene;
+#[cfg(windows)]
 pub mod autostart;
 #[cfg(windows)]
 pub mod hooks;
@@ -15,6 +17,10 @@ pub mod ipc_server;
 #[cfg(windows)]
 pub mod mascot;
 pub mod overlay;
+#[cfg(windows)]
+pub mod scene_draw;
+#[cfg(windows)]
+pub mod sprite;
 
 /// Run the daemon until IPC StopService exits the process.
 pub fn run(mut args: impl Iterator<Item = String>) -> i32 {
