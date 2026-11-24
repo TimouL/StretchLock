@@ -16,6 +16,10 @@ pub struct StatsData {
     pub total_breaks: u64,
     pub current_streak_days: u32,
     pub last_break_date: String,
+    /// Id of the most recently shown lock-screen scene (`scene::LockScene::id`).
+    pub last_scene: String,
+    /// Consecutive non-animal scene picks, for the picker's pity rule.
+    pub non_animal_streak: u32,
 }
 
 impl StatsData {
@@ -63,6 +67,8 @@ struct RawStats {
     total_breaks: Option<Value>,
     current_streak_days: Option<Value>,
     last_break_date: Option<Value>,
+    last_scene: Option<Value>,
+    non_animal_streak: Option<Value>,
 }
 
 impl From<RawStats> for StatsData {
@@ -72,6 +78,8 @@ impl From<RawStats> for StatsData {
             total_breaks: value_u64(raw.total_breaks.as_ref(), 0),
             current_streak_days: value_u32(raw.current_streak_days.as_ref(), 0),
             last_break_date: value_str(raw.last_break_date.as_ref(), ""),
+            last_scene: value_str(raw.last_scene.as_ref(), ""),
+            non_animal_streak: value_u32(raw.non_animal_streak.as_ref(), 0),
         }
     }
 }
@@ -115,8 +123,24 @@ impl Stats {
         );
     }
 
-    pub fn get_summary(&mut self) -> (u32, u64, u32) {
-        let today = today_iso();
+    /// Scene-picker state persisted for the lock-screen scene guarantee:
+    /// the last scene's id ("" when none yet) and the current
+    /// consecutive non-animal pick count.
+    pub fn scene_state(&self) -> (&str, u32) {
+        (&self.data.last_scene, self.data.non_animal_streak)
+    }
+
+    /// Record a freshly picked scene and save immediately, so the
+    /// no-repeat / animal-pity guarantee survives a daemon restart.
+    pub fn set_scene_state(&mut self, last_scene: &str, non_animal_streak: u32) {
+        self.data.last_scene = last_scene.to_string();
+        self.data.non_animal_streak = non_animal_streak;
+        if let Err(err) = self.save() {
+            log::warn!("Failed to save scene state: {}", err);
+        }
+    }
+
+    pub fn get_summary(&mut self) -> (u32, u64, u32) {        let today = today_iso();
         self.data.rollover_for_read(&today);
         (
             self.data.breaks_today,
@@ -143,6 +167,7 @@ mod tests {
             total_breaks: total,
             current_streak_days: streak,
             last_break_date: last.to_string(),
+            ..StatsData::default()
         }
     }
 
@@ -260,5 +285,45 @@ mod tests {
         assert_eq!(stats.data().total_breaks, 0);
         assert_eq!(stats.data().current_streak_days, 3);
         assert_eq!(stats.data().last_break_date, "");
+    }
+
+    #[test]
+    fn scene_state_round_trip() {
+        let dir = temp_dir("stats-scene-roundtrip");
+        let mut stats = Stats::load(&dir);
+        assert_eq!(stats.scene_state(), ("", 0));
+        stats.set_scene_state("owl", 0);
+        stats.set_scene_state("rain", 2);
+        assert_eq!(stats.scene_state(), ("rain", 2));
+        let reloaded = Stats::load(&dir);
+        assert_eq!(reloaded.data().last_scene, "rain");
+        assert_eq!(reloaded.data().non_animal_streak, 2);
+        // Other stats survive alongside the scene state.
+        assert_eq!(reloaded.data().total_breaks, 0);
+    }
+
+    #[test]
+    fn legacy_stats_without_scene_fields_loads() {
+        let dir = temp_dir("stats-scene-legacy");
+        fs::write(
+            dir.join(STATS_FILENAME),
+            r#"{"breaks_today": 1, "total_breaks": 9, "current_streak_days": 2, "last_break_date": "2026-01-10"}"#,
+        )
+        .unwrap();
+        let stats = Stats::load(&dir);
+        assert_eq!(stats.scene_state(), ("", 0));
+        assert_eq!(stats.data().total_breaks, 9);
+    }
+
+    #[test]
+    fn wrong_typed_scene_fields_use_defaults() {
+        let dir = temp_dir("stats-scene-tolerant");
+        fs::write(
+            dir.join(STATS_FILENAME),
+            r#"{"last_scene": 7, "non_animal_streak": "many"}"#,
+        )
+        .unwrap();
+        let stats = Stats::load(&dir);
+        assert_eq!(stats.scene_state(), ("", 0));
     }
 }
