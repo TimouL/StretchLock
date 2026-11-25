@@ -925,10 +925,15 @@ unsafe fn paint(hwnd: HWND) {
     }
     let scale = dpi as f32 / 96.0;
     let g = 8.0 * scale;
-    // In the wide layout the mascot is demoted to a small companion above
-    // the ring instead of a second hero competing with it: the ring alone
-    // carries the right column. Narrow keeps the original large mascot.
-    let mascot_frac = if wide { 0.12 } else { 0.30 };
+    // The wide layout drops the mascot entirely: repeated on-device
+    // review found the mascot in its glass circle was the element that
+    // kept making the split layout feel off, so the countdown ring is
+    // the right column's only visual anchor there. Narrow keeps the
+    // original large mascot.
+    let mascot_frac = if wide { 0.0 } else { 0.30 };
+    // With the mascot gone the wide ring grows a little to carry the
+    // right column on its own.
+    let ring_frac = if wide { 0.34 } else { 0.30 };
     // Height fit: on short screens (e.g. 800x600) the natural stack
     // (clock, date, bubble, mascot, ring, stats, field, hint) is taller
     // than the display, which pushed the ring and passphrase field off
@@ -948,7 +953,7 @@ unsafe fn paint(hwnd: HWND) {
         natural += g; // done branch advances one extra gap after the mascot
         natural += 20.0 * scale + g * 2.0; // stats + gap
     } else {
-        natural += short * 0.30 + g * 3.0; // ring + gap
+        natural += short * ring_frac + g * 3.0; // ring + gap
         natural += 20.0 * scale + g * 2.0; // stats + gap
         natural += 48.0 * scale + 6.0 * scale + 18.0 * scale; // field + hint
     }
@@ -969,7 +974,7 @@ unsafe fn paint(hwnd: HWND) {
         if content.done {
             h += gf + 20.0 * scale + gf * 2.0 + 52.0 * scale; // extra gap + stats + gap + button
         } else {
-            h += short * 0.30 * fit + gf * 3.0; // ring + gap
+            h += short * ring_frac * fit + gf * 3.0; // ring + gap
             h += 20.0 * scale + gf * 2.0; // stats + gap
             h += field_h_fit + 6.0 * scale + 18.0 * scale; // field + hint
         }
@@ -1124,12 +1129,14 @@ unsafe fn paint(hwnd: HWND) {
         right: (cx + mascot_size / 2.0) as i32,
         bottom: (cursor + mascot_size) as i32,
     };
-    draw_mascot_d2d(&target, &mascot_rect, &content);
+    if mascot_size > 0.0 {
+        draw_mascot_d2d(&target, &mascot_rect, &content);
+    }
     cursor = mascot_rect.bottom as f32 + gf * 3.0;
 
     // ---- Progress ring + countdown ----
     if !content.done {
-        let ring_diam = short * 0.30 * fit;
+        let ring_diam = short * ring_frac * fit;
         let ring_center_x = cx;
         let ring_center_y = cursor + ring_diam / 2.0;
         let fraction = content.fraction;
