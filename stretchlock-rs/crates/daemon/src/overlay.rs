@@ -964,6 +964,21 @@ unsafe fn paint(hwnd: HWND) {
     };
     let gf = g * fit;
     let field_h_fit = (48.0 * scale * fit).max(34.0 * scale);
+    if wide {
+        // Design B ("scene diorama") wide layout, see paint_wide_b. The
+        // narrow single-column flow below is unchanged.
+        paint_wide_b(
+            &target,
+            &write,
+            &content,
+            hwnd,
+            width as f32,
+            height as f32,
+            short,
+            scale,
+            field_h_fit,
+        );
+    } else {
     // Wide layout: centre the right column as a group instead of starting
     // it at the top of the screen. Its fitted height is estimated with the
     // same sizes the flow below uses, so the group lands centred; the
@@ -1370,6 +1385,7 @@ unsafe fn paint(hwnd: HWND) {
             }
         }
     }
+    }
 
     if target.EndDraw(None, None).is_err() {
         let _ = target.Resize(&D2D_SIZE_U {
@@ -1380,6 +1396,308 @@ unsafe fn paint(hwnd: HWND) {
     }
 }
 
+
+/// Design B ("scene diorama") wide layout. A quiet top bar — light
+/// clock and date on the left, the current scene's name on the right —
+/// a centred group (message, big light remaining time, stats), a
+/// hairline progress bar at the very top edge, and the passphrase
+/// field (or the resume button when done) as a frosted-glass float
+/// centred just above the scene world's horizon. Typography: Segoe UI
+/// Light for the numerals (the iOS clock feel), Microsoft YaHei UI
+/// for Chinese text. The narrow layout keeps the original flow.
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_wide_b(
+    target: &ID2D1HwndRenderTarget,
+    write: &IDWriteFactory,
+    content: &OverlayContent,
+    hwnd: HWND,
+    width: f32,
+    height: f32,
+    short: f32,
+    scale: f32,
+    field_h: f32,
+) {
+    let margin = width * 0.045;
+
+    // Hairline progress at the top edge; drains with the break.
+    let line_h = 3.0 * scale;
+    if let Some(track) = solid_brush(target, 255, 255, 255, 0.06) {
+        let r = D2D_RECT_F { left: 0.0, top: 0.0, right: width, bottom: line_h };
+        let _ = target.FillRectangle(&r, Some(&track));
+    }
+    let pw = width * content.fraction.clamp(0.0, 1.0);
+    if pw > 0.0 {
+        if let Some(grad) = aurora_gradient_brush(target, width / 2.0, line_h / 2.0, width / 2.0) {
+            let r = D2D_RECT_F { left: 0.0, top: 0.0, right: pw, bottom: line_h };
+            let _ = target.FillRectangle(&r, Some(&grad));
+        }
+    }
+
+    // Top-left: clock (light) + date.
+    let now = Local::now();
+    let clock_text = format!("{:02}:{:02}", now.hour(), now.minute());
+    let weekday_cn = match now.weekday() {
+        chrono::Weekday::Mon => "星期一",
+        chrono::Weekday::Tue => "星期二",
+        chrono::Weekday::Wed => "星期三",
+        chrono::Weekday::Thu => "星期四",
+        chrono::Weekday::Fri => "星期五",
+        chrono::Weekday::Sat => "星期六",
+        chrono::Weekday::Sun => "星期日",
+    };
+    let date_text = format!("{}月{}日 {}", now.month(), now.day(), weekday_cn);
+    let clock_size = short * 0.072;
+    let top_y = height * 0.048;
+    if let Some(fmt) = text_format(write, w!("Segoe UI"), clock_size, DWRITE_FONT_WEIGHT_LIGHT, false, true) {
+        if let Some(white) = solid_brush(target, 255, 255, 255, 1.0) {
+            let rect = D2D_RECT_F {
+                left: margin,
+                top: top_y,
+                right: width * 0.5,
+                bottom: top_y + clock_size * 1.25,
+            };
+            draw_text_d2d(target, &fmt, &clock_text, &rect, &white);
+        }
+    }
+    if let Some(fmt) = text_format(write, w!("Microsoft YaHei UI"), 14.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, false, true) {
+        if let Some(c) = solid_brush(target, 216, 210, 232, 0.9) {
+            let rect = D2D_RECT_F {
+                left: margin + 2.0 * scale,
+                top: top_y + clock_size * 1.25 + 2.0 * scale,
+                right: width * 0.5,
+                bottom: top_y + clock_size * 1.25 + 24.0 * scale,
+            };
+            draw_text_d2d(target, &fmt, &date_text, &rect, &c);
+        }
+    }
+    // Top-right: the scene's name, quietly.
+    if let Some(scene) = content.scene {
+        if let Some(fmt) = text_format(write, w!("Microsoft YaHei UI"), 14.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, true) {
+            if let Some(c) = solid_brush(target, 216, 210, 232, 0.75) {
+                let rect = D2D_RECT_F {
+                    left: width * 0.55,
+                    top: top_y,
+                    right: width - margin,
+                    bottom: top_y + clock_size * 1.25,
+                };
+                draw_text_d2d(target, &fmt, scene.name(), &rect, &c);
+            }
+        }
+    }
+
+    // Centre group: message, big light remaining time, stats.
+    if !content.message.is_empty() {
+        if let Some(fmt) = text_format(write, w!("Microsoft YaHei UI"), 21.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, true) {
+            if let Some(white) = solid_brush(target, 255, 255, 255, 0.95) {
+                let rect = D2D_RECT_F {
+                    left: 0.0,
+                    top: height * 0.235,
+                    right: width,
+                    bottom: height * 0.235 + 36.0 * scale,
+                };
+                draw_text_d2d(target, &fmt, &content.message, &rect, &white);
+            }
+        }
+    }
+    let time_y = height * 0.315;
+    let time_size = short * 0.145;
+    if !content.done {
+        if let Some(fmt) = text_format(write, w!("Segoe UI"), time_size, DWRITE_FONT_WEIGHT_LIGHT, true, true) {
+            if let Some(white) = solid_brush(target, 255, 255, 255, 1.0) {
+                let rect = D2D_RECT_F {
+                    left: 0.0,
+                    top: time_y,
+                    right: width,
+                    bottom: time_y + time_size * 1.25,
+                };
+                draw_text_d2d(target, &fmt, &content.countdown, &rect, &white);
+            }
+        }
+    }
+    let stats_y = if content.done {
+        time_y
+    } else {
+        time_y + time_size * 1.25 + 10.0 * scale
+    };
+    if let Some(fmt) = text_format(write, w!("Microsoft YaHei UI"), 13.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, true) {
+        if let Some(c) = solid_brush(target, 206, 200, 224, 0.85) {
+            let rect = D2D_RECT_F {
+                left: 0.0,
+                top: stats_y,
+                right: width,
+                bottom: stats_y + 20.0 * scale,
+            };
+            draw_text_d2d(target, &fmt, &content.stats, &rect, &c);
+        }
+    }
+
+    // Floating glass layer just above the horizon (0.70 * height).
+    let float_top = height * 0.575;
+    let cx = width / 2.0;
+    if !content.done {
+        clear_resume_rect(hwnd);
+        // Passphrase field: same glass capsule, dots, shake and
+        // lockout rendering as the narrow flow, floated instead of
+        // stacked.
+        let locked = content.lockout_seconds > 0;
+        let err_secs = error_elapsed_secs();
+        let shake = match err_secs {
+            Some(s) if s < 0.6 => 8.0 * scale * (s * 40.0).sin() * (-s * 4.0).exp(),
+            _ => 0.0,
+        };
+        let field_cx = cx + shake;
+        let field_w = (width * 0.26).max(300.0 * scale);
+        let field = D2D_RECT_F {
+            left: field_cx - field_w / 2.0,
+            top: float_top,
+            right: field_cx + field_w / 2.0,
+            bottom: float_top + field_h,
+        };
+        let typed = content.passphrase_len > 0;
+        let field_rr = D2D1_ROUNDED_RECT {
+            rect: field,
+            radiusX: field_h / 2.0,
+            radiusY: field_h / 2.0,
+        };
+        let fill_alpha = if locked { 0.05 } else { 0.10 };
+        if let Some(glass) = solid_brush(target, 255, 255, 255, fill_alpha) {
+            let _ = target.FillRoundedRectangle(&field_rr, Some(&glass));
+        }
+        let error_recent = matches!(err_secs, Some(s) if s < 1.5);
+        if locked {
+            if let Some(edge) = solid_brush(target, 255, 255, 255, 0.08) {
+                let _ = target.DrawRoundedRectangle(&field_rr, Some(&edge), 1.0, None);
+            }
+        } else if error_recent {
+            if let Some(edge) = solid_brush(target, 248, 113, 113, 1.0) {
+                let _ = target.DrawRoundedRectangle(&field_rr, Some(&edge), 1.5 * scale, None);
+            }
+        } else if typed {
+            if let Some(edge) = aurora_gradient_brush(target, field_cx, float_top + field_h / 2.0, field_w / 2.0) {
+                let _ = target.DrawRoundedRectangle(&field_rr, Some(&edge), 1.5 * scale, None);
+            }
+        } else if let Some(edge) = solid_brush(target, 255, 255, 255, 0.15) {
+            let _ = target.DrawRoundedRectangle(&field_rr, Some(&edge), 1.0, None);
+        }
+        let lock_grey = if locked { 90 } else { 135 };
+        if let Some(lock) = solid_brush(target, lock_grey, lock_grey, lock_grey, 1.0) {
+            let lx = field.left + 16.0 * scale;
+            let lcy = float_top + field_h / 2.0;
+            let lr = 6.0 * scale;
+            let ring_cy = lcy - 5.0 * scale;
+            let lock_ring = D2D1_ELLIPSE {
+                point: D2D_POINT_2F { x: lx, y: ring_cy },
+                radiusX: lr,
+                radiusY: lr,
+            };
+            let _ = target.DrawEllipse(&lock_ring, Some(&lock), 1.5 * scale, None);
+            let lock_body = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: lx - lr - 1.0 * scale,
+                    top: lcy - 1.0 * scale,
+                    right: lx + lr + 1.0 * scale,
+                    bottom: lcy + 11.0 * scale,
+                },
+                radiusX: 3.0 * scale,
+                radiusY: 3.0 * scale,
+            };
+            let _ = target.FillRoundedRectangle(&lock_body, Some(&lock));
+        }
+        let text_left = field.left + 34.0 * scale;
+        let text_rect = D2D_RECT_F {
+            left: text_left,
+            top: float_top,
+            right: field.right - 10.0 * scale,
+            bottom: float_top + field_h,
+        };
+        if locked {
+            // Locked out: nothing of the typed buffer is shown.
+        } else if typed {
+            let n = content.passphrase_len.min(24);
+            if let Some(white) = solid_brush(target, 255, 255, 255, 1.0) {
+                let cy = float_top + field_h / 2.0;
+                let area_w = (text_rect.right - text_rect.left).max(1.0);
+                let mut d = 10.0 * scale;
+                let mut pitch = 14.0 * scale;
+                if n > 1 && (n as f32 - 1.0) * pitch + d > area_w {
+                    pitch = ((area_w - d) / (n as f32 - 1.0)).max(d * 1.05);
+                    d = d.min(pitch * 0.75);
+                }
+                let span = if n > 1 {
+                    (n as f32 - 1.0) * pitch + d
+                } else {
+                    d
+                };
+                let mut dx = text_rect.left + (area_w - span) / 2.0 + d / 2.0;
+                for _ in 0..n {
+                    let dot = D2D1_ELLIPSE {
+                        point: D2D_POINT_2F { x: dx, y: cy },
+                        radiusX: d / 2.0,
+                        radiusY: d / 2.0,
+                    };
+                    let _ = target.FillEllipse(&dot, Some(&white));
+                    dx += pitch;
+                }
+            }
+        } else if let Some(fmt) = text_format(write, w!("Microsoft YaHei UI"), 17.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, false, true) {
+            if let Some(ph) = solid_brush(target, 120, 106, 110, 1.0) {
+                draw_text_d2d(target, &fmt, "输入口令", &text_rect, &ph);
+            }
+        }
+        if let Some(fmt) = text_format(write, w!("Microsoft YaHei UI"), 13.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, false) {
+            let (hr, hg, hb) = if content.passphrase_error {
+                (252, 165, 165)
+            } else {
+                (148, 135, 138)
+            };
+            if let Some(h) = solid_brush(target, hr, hg, hb, 1.0) {
+                let rect = D2D_RECT_F {
+                    left: 0.0,
+                    top: float_top + field_h + 6.0 * scale,
+                    right: width,
+                    bottom: float_top + field_h + 24.0 * scale,
+                };
+                draw_text_d2d(target, &fmt, &content.hint, &rect, &h);
+            }
+        }
+    } else {
+        // Resume button in the same floating spot; the painted rect is
+        // stored so the click handler hit-tests what was drawn.
+        let bw = ((width * 0.26) as i32).max((300.0 * scale) as i32);
+        let bh = (52.0 * scale) as i32;
+        let btn = RECT {
+            left: (cx as i32) - bw / 2,
+            top: float_top as i32,
+            right: (cx as i32) + bw / 2,
+            bottom: float_top as i32 + bh,
+        };
+        store_resume_rect(hwnd, &btn);
+        let btn_rr = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: btn.left as f32,
+                top: btn.top as f32,
+                right: btn.right as f32,
+                bottom: btn.bottom as f32,
+            },
+            radiusX: (btn.bottom - btn.top) as f32 / 2.0,
+            radiusY: (btn.bottom - btn.top) as f32 / 2.0,
+        };
+        if let Some(fill) = solid_brush(target, 167, 139, 250, 1.0) {
+            let _ = target.FillRoundedRectangle(&btn_rr, Some(&fill));
+        }
+        if let Some(fmt) = text_format(write, w!("Microsoft YaHei UI"), 20.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, true, true) {
+            if let Some(tc) = solid_brush(target, 34, 20, 54, 1.0) {
+                let rect = D2D_RECT_F {
+                    left: btn.left as f32,
+                    top: btn.top as f32,
+                    right: btn.right as f32,
+                    bottom: btn.bottom as f32,
+                };
+                draw_text_d2d(target, &fmt, "开始使用", &rect, &tc);
+            }
+        }
+    }
+}
 
 /// Paint the blurred desktop capture for this monitor, or a solid fallback.
 /// Composite the current mascot frame into the back-buffer pixels.

@@ -149,6 +149,13 @@ pub unsafe fn draw_scene(
     let short = width.min(height).max(1.0);
     // Unit: prototype sizes are CSS px on a ~800 px-short-side canvas.
     let u = short / 800.0;
+    // Design B ("scene diorama"): in the wide layout the scenes live in
+    // a small world with a horizon at 0.70 * height — a soft ground
+    // silhouette below it, a pond for the water scenes — instead of
+    // floating over the whole screen. Narrow keeps the free layout.
+    if is_wide(width, height) {
+        draw_world(target, factory, scene, width, height);
+    }
     match scene {
         LockScene::Fireflies => fireflies(target, t, width, height, u),
         LockScene::Stars => stars(target, t, width, height, u),
@@ -164,6 +171,57 @@ pub unsafe fn draw_scene(
                 warn_fallback_once(animal);
                 stars(target, t, width, height, u);
             }
+        }
+    }
+}
+
+/// The wide split layout test, shared by the world backdrop and the
+/// per-scene coordinate remaps.
+fn is_wide(w: f32, h: f32) -> bool {
+    w >= 1100.0 || w >= h * 1.4
+}
+
+/// Ground line of the wide-layout diorama world.
+fn horizon(h: f32) -> f32 {
+    h * 0.70
+}
+
+/// The diorama backdrop: a gentle hill silhouette under the horizon
+/// with a faint rim light, plus a pond ellipse for the water scenes
+/// (fish, ducks, bubbles). Drawn under the scene's own elements.
+unsafe fn draw_world(
+    target: &ID2D1HwndRenderTarget,
+    factory: &ID2D1Factory,
+    scene: LockScene,
+    w: f32,
+    h: f32,
+) {
+    let hz = horizon(h);
+    // Hill curve: horizon height modulated by a slow sine so the ground
+    // reads as rolling terrain rather than a straight cut.
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(26);
+    for i in 0..=24 {
+        let fx = i as f32 / 24.0;
+        let y = hz + (fx * PI * 1.35 + 0.6).sin() * h * 0.014 + fx * h * 0.012;
+        pts.push((fx * w, y));
+    }
+    let rim: Vec<(f32, f32)> = pts.clone();
+    pts.push((w, h));
+    pts.push((0.0, h));
+    if let Some(b) = solid_brush(target, 24, 20, 44, 0.52) {
+        fill_poly(target, factory, &pts, &b);
+    }
+    if let Some(b) = solid_brush(target, 255, 255, 255, 0.07) {
+        for seg in rim.windows(2) {
+            line(target, seg[0].0, seg[0].1, seg[1].0, seg[1].1, &b, 1.5);
+        }
+    }
+    if matches!(scene, LockScene::Fish | LockScene::Ducks | LockScene::Bubbles) {
+        if let Some(b) = solid_brush(target, 56, 140, 220, 0.13) {
+            fill_ellipse(target, w * 0.5, h * 0.905, w * 0.47, h * 0.075, &b);
+        }
+        if let Some(b) = solid_brush(target, 125, 211, 252, 0.20) {
+            stroke_ellipse(target, w * 0.5, h * 0.905, w * 0.47, h * 0.075, &b, 1.5);
         }
     }
 }
@@ -190,7 +248,12 @@ unsafe fn fireflies(target: &ID2D1HwndRenderTarget, t: f32, w: f32, h: f32, u: f
     let spec = LockScene::Fireflies.spec();
     for i in 0..spec.count {
         let bx = sp(i, 11) * w;
-        let by = h * (0.30 + 0.55 * sp(i, 23));
+        // Wide diorama: fireflies hover over the meadow band.
+        let by = if is_wide(w, h) {
+            h * (0.55 + 0.33 * sp(i, 23))
+        } else {
+            h * (0.30 + 0.55 * sp(i, 23))
+        };
         let d = dur(spec.duration_s, i, 37);
         let ph = sp(i, 41) * TAU;
         let x = bx + (t * TAU / d * 0.7 + ph).sin() * 30.0 * u + (t * TAU / d + ph * 2.0).cos() * 12.0 * u;
@@ -237,7 +300,12 @@ unsafe fn bubbles(target: &ID2D1HwndRenderTarget, t: f32, w: f32, h: f32, u: f32
         let p = frac(t / d + sp(i, 211));
         let r = lerp(spec.size_px.0, spec.size_px.1, sp(i, 223)) * u * 0.5;
         let x = sp(i, 227) * w + (t * TAU / d * 2.0 + sp(i, 229) * TAU).sin() * 14.0 * u;
-        let y = h * 1.05 - p * h * 1.15;
+        // Wide diorama: bubbles rise through the pond band only.
+        let y = if is_wide(w, h) {
+            h * 1.0 - p * h * 0.32
+        } else {
+            h * 1.05 - p * h * 1.15
+        };
         if let Some(ring) = solid_brush(target, 255, 255, 255, 0.55) {
             stroke_ellipse(target, x, y, r, r, &ring, 1.5);
         }
@@ -259,11 +327,17 @@ unsafe fn fish(
     const LENS: [f32; 3] = [56.0, 38.0, 46.0];
     const DURS: [f32; 3] = [24.0, 31.0, 27.0];
     const ROWS: [f32; 3] = [0.20, 0.42, 0.63];
+    // Wide diorama: the three fish rows live inside the pond band.
+    let rows = if is_wide(w, h) {
+        [0.80, 0.865, 0.925]
+    } else {
+        ROWS
+    };
     for i in 0..3 {
         let len = LENS[i] * u;
         let p = frac(t / DURS[i] + sp(i, 311));
         let x = -len + p * (w + 2.0 * len);
-        let yc = h * ROWS[i] + (t * TAU / 3.2 + i as f32 * 1.7).sin() * 11.0 * u;
+        let yc = h * rows[i] + (t * TAU / 3.2 + i as f32 * 1.7).sin() * 11.0 * u;
         let (r, g, b) = COLORS[i];
         let fh = len * 0.55;
         if let Some(body) = solid_brush(target, r, g, b, 0.92) {
@@ -367,7 +441,12 @@ unsafe fn notes(
         let p = frac(t / d + sp(i, 509));
         let size = lerp(spec.size_px.0, spec.size_px.1, sp(i, 521)) * u;
         let x = sp(i, 523) * w + (p * TAU + i as f32).sin() * 16.0 * u;
-        let y = h * 0.84 - p * h * 0.64;
+        // Wide diorama: notes rise from the ground into the sky.
+        let y = if is_wide(w, h) {
+            h * 0.88 - p * h * 0.60
+        } else {
+            h * 0.84 - p * h * 0.64
+        };
         let alpha = (p * PI).sin().clamp(0.0, 1.0) * 0.85;
         let (r, g, b) = COLORS[i % 3];
         let Some(fmt) = text_format(write, w!("Segoe UI"), size, DWRITE_FONT_WEIGHT_NORMAL, true, true) else {
@@ -429,7 +508,12 @@ unsafe fn leaves(
         let d = dur(spec.duration_s, i, 701);
         let p = frac(t / d + sp(i, 709));
         let size = lerp(spec.size_px.0, spec.size_px.1, sp(i, 719)) * u * 1.4;
-        let y = -20.0 * u + p * (h + 40.0 * u);
+        // Wide diorama: leaves fall from the sky and land on the ground.
+        let y = if is_wide(w, h) {
+            -20.0 * u + p * (h * 0.99 + 20.0 * u)
+        } else {
+            -20.0 * u + p * (h + 40.0 * u)
+        };
         let x = sp(i, 727) * w + (p * TAU * 1.5 + i as f32).sin() * 30.0 * u;
         let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
         let ang = dir * p * 380.0_f32.to_radians() + sp(i, 733) * TAU;
@@ -541,26 +625,27 @@ unsafe fn animals(
     short: f32,
 ) -> bool {
     let mut ok = true;
-    // In the wide split layout the fixed-anchor animals move to the
-    // bottom-centre gutter between the two columns, so they never sit
-    // under the clock text or the ring column. Travelling animals
-    // (birds up top, rabbits/penguins/ducks along the ground line) keep
-    // crossing the full width: they read as a stage, not clutter.
-    let wide = w >= 1100.0 || w >= h * 1.4;
+    // Design B diorama (wide): fixed-anchor animals live on the ground
+    // band in the bottom-centre of the world; travelling animals
+    // (birds in the sky band, rabbits/penguins/ducks along the ground
+    // or pond line) cross the full width as a stage. Narrow keeps the
+    // original free placement.
+    let wide = is_wide(w, h);
     match scene {
         LockScene::CatChasingButterfly => {
-            // Cat sits lower-left of centre; the butterfly loops above it.
+            // Cat sits on the ground; the butterfly loops above it.
             let cat_x = if wide { w * 0.47 } else { w * 0.30 };
+            let cat_y = if wide { h * 0.845 } else { h * 0.76 };
             ok &= blit(
                 target,
                 crate::animal_scene::render_sprite(scene, (short * 0.17) as u32),
                 cat_x,
-                h * 0.76,
+                cat_y,
                 short * 0.17,
             );
             let ang = t * 0.9;
             let bx = cat_x + ang.cos() * short * 0.10;
-            let by = h * 0.57 + ang.sin() * short * 0.045;
+            let by = (if wide { h * 0.66 } else { h * 0.57 }) + ang.sin() * short * 0.045;
             ok &= blit(
                 target,
                 crate::animal_scene::render_butterfly((short * 0.055) as u32),
@@ -571,7 +656,13 @@ unsafe fn animals(
         }
         LockScene::Rabbits => {
             // Big rabbit leading, small one trailing, both hopping.
-            for (trail, size, ground) in [(0.0f32, 0.115f32, 0.80f32), (0.055, 0.085, 0.835)] {
+            // Wide diorama: they hop along the world's ground band.
+            let grounds = if wide {
+                [(0.0f32, 0.115f32, 0.865f32), (0.055, 0.085, 0.90)]
+            } else {
+                [(0.0f32, 0.115f32, 0.80f32), (0.055, 0.085, 0.835)]
+            };
+            for (trail, size, ground) in grounds {
                 let p = frac(t / 11.0 - trail);
                 let x = -0.08 * w + p * 1.16 * w;
                 let hop = (p * PI * 9.0).sin().abs() * short * 0.05;
@@ -601,7 +692,7 @@ unsafe fn animals(
         LockScene::Owl => {
             // A simple branch for the owl to sit on.
             let (bx0, by0, bx1, by1, ox, oy) = if wide {
-                (w * 0.33, h * 0.845, w * 0.61, h * 0.815, w * 0.47, h * 0.72)
+                (w * 0.33, h * 0.80, w * 0.61, h * 0.77, w * 0.47, h * 0.685)
             } else {
                 (w * 0.60, h * 0.815, w * 0.96, h * 0.785, w * 0.78, h * 0.70)
             };
@@ -621,7 +712,8 @@ unsafe fn animals(
             for i in 0..3 {
                 let p = frac(t / 17.0 - i as f32 * 0.045);
                 let x = -0.08 * w + p * 1.16 * w;
-                let y = h * 0.80 - (t * 2.4 + i as f32 * 2.1).sin().abs() * 3.0;
+                let y = h * (if wide { 0.87 } else { 0.80 })
+                    - (t * 2.4 + i as f32 * 2.1).sin().abs() * 3.0;
                 ok &= blit(
                     target,
                     crate::animal_scene::render_sprite(scene, (short * 0.105) as u32),
@@ -634,11 +726,12 @@ unsafe fn animals(
         LockScene::Panda => {
             let sway = (t * 0.7).sin() * 3.0;
             let px = if wide { w * 0.47 } else { w * 0.24 };
+            let py = if wide { h * 0.835 } else { h * 0.72 };
             ok &= blit(
                 target,
                 crate::animal_scene::render_sprite(scene, (short * 0.18) as u32),
                 px + sway,
-                h * 0.72,
+                py,
                 short * 0.18,
             );
         }
@@ -646,7 +739,8 @@ unsafe fn animals(
             for i in 0..3 {
                 let p = frac(t / 17.0 - i as f32 * 0.05);
                 let x = -0.08 * w + p * 1.16 * w;
-                let y = h * 0.82;
+                // Wide diorama: ducks paddle on the pond band.
+                let y = h * (if wide { 0.885 } else { 0.82 });
                 let size = short * 0.095;
                 // Expanding ripple under each duck.
                 let rp = frac(t / 1.8 + i as f32 * 0.33);
