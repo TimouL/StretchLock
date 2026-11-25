@@ -541,18 +541,25 @@ unsafe fn animals(
     short: f32,
 ) -> bool {
     let mut ok = true;
+    // In the wide split layout the fixed-anchor animals move to the
+    // bottom-centre gutter between the two columns, so they never sit
+    // under the clock text or the ring column. Travelling animals
+    // (birds up top, rabbits/penguins/ducks along the ground line) keep
+    // crossing the full width: they read as a stage, not clutter.
+    let wide = w >= 1100.0 || w >= h * 1.4;
     match scene {
         LockScene::CatChasingButterfly => {
             // Cat sits lower-left of centre; the butterfly loops above it.
+            let cat_x = if wide { w * 0.47 } else { w * 0.30 };
             ok &= blit(
                 target,
                 crate::animal_scene::render_sprite(scene, (short * 0.17) as u32),
-                w * 0.30,
+                cat_x,
                 h * 0.76,
                 short * 0.17,
             );
             let ang = t * 0.9;
-            let bx = w * 0.30 + ang.cos() * short * 0.10;
+            let bx = cat_x + ang.cos() * short * 0.10;
             let by = h * 0.57 + ang.sin() * short * 0.045;
             ok &= blit(
                 target,
@@ -593,15 +600,20 @@ unsafe fn animals(
         }
         LockScene::Owl => {
             // A simple branch for the owl to sit on.
+            let (bx0, by0, bx1, by1, ox, oy) = if wide {
+                (w * 0.33, h * 0.845, w * 0.61, h * 0.815, w * 0.47, h * 0.72)
+            } else {
+                (w * 0.60, h * 0.815, w * 0.96, h * 0.785, w * 0.78, h * 0.70)
+            };
             if let Some(b) = solid_brush(target, 146, 104, 63, 0.9) {
-                line(target, w * 0.60, h * 0.815, w * 0.96, h * 0.785, &b, short * 0.012);
+                line(target, bx0, by0, bx1, by1, &b, short * 0.012);
             }
             let sway = (t * 0.8).sin() * 4.0;
             ok &= blit(
                 target,
                 crate::animal_scene::render_sprite(scene, (short * 0.16) as u32),
-                w * 0.78 + sway,
-                h * 0.70,
+                ox + sway,
+                oy,
                 short * 0.16,
             );
         }
@@ -621,10 +633,11 @@ unsafe fn animals(
         }
         LockScene::Panda => {
             let sway = (t * 0.7).sin() * 3.0;
+            let px = if wide { w * 0.47 } else { w * 0.24 };
             ok &= blit(
                 target,
                 crate::animal_scene::render_sprite(scene, (short * 0.18) as u32),
-                w * 0.24 + sway,
+                px + sway,
                 h * 0.72,
                 short * 0.18,
             );

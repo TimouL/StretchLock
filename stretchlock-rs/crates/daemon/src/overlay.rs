@@ -925,6 +925,10 @@ unsafe fn paint(hwnd: HWND) {
     }
     let scale = dpi as f32 / 96.0;
     let g = 8.0 * scale;
+    // In the wide layout the mascot is demoted to a small companion above
+    // the ring instead of a second hero competing with it: the ring alone
+    // carries the right column. Narrow keeps the original large mascot.
+    let mascot_frac = if wide { 0.12 } else { 0.30 };
     // Height fit: on short screens (e.g. 800x600) the natural stack
     // (clock, date, bubble, mascot, ring, stats, field, hint) is taller
     // than the display, which pushed the ring and passphrase field off
@@ -932,7 +936,7 @@ unsafe fn paint(hwnd: HWND) {
     // formulas below and shrink the stack by `fit` (never below 0.55)
     // so everything stays on screen; roomy screens keep fit = 1.
     let avail_h = height as f32 - short * 0.045 - 30.0 * scale;
-    let mut natural = short * 0.30 + g * 3.0; // mascot + gap
+    let mut natural = short * mascot_frac + g * 3.0; // mascot + gap
     if !wide {
         natural += short * 0.11 * 1.25 + g; // clock + gap
         natural += 22.0 * scale + g * 3.0; // date + gap
@@ -961,7 +965,7 @@ unsafe fn paint(hwnd: HWND) {
     // left column is centred the same way further down, giving both
     // columns one shared vertical rhythm.
     let stack_h = {
-        let mut h = short * 0.30 * fit + gf * 3.0; // mascot + gap
+        let mut h = short * mascot_frac * fit + gf * 3.0; // mascot + gap
         if content.done {
             h += gf + 20.0 * scale + gf * 2.0 + 52.0 * scale; // extra gap + stats + gap + button
         } else {
@@ -996,7 +1000,7 @@ unsafe fn paint(hwnd: HWND) {
     if wide {
         // Left column: big light clock, date, then the break message as
         // plain text (no speech-bubble box in this layout).
-        let clock_size = short * 0.13;
+        let clock_size = short * 0.17;
         let col_cx = width as f32 * 0.24;
         let col_w = width as f32 * 0.40;
         // Centre the left column as a group too (same treatment as the
@@ -1113,7 +1117,7 @@ unsafe fn paint(hwnd: HWND) {
     }
 
     // ---- Mascot ----
-    let mascot_size = short * 0.30 * fit;
+    let mascot_size = short * mascot_frac * fit;
     let mascot_rect = RECT {
         left: (cx - mascot_size / 2.0) as i32,
         top: cursor as i32,
